@@ -1,0 +1,37 @@
+site_name: relign
+site_dir: build
+repo_url: https://github.com/HS-Kempten/relign
+repo_name: relign
+strict: false
+use_directory_urls: false
+
+theme:
+    name: readthedocs
+    highlightjs: true
+    logo: ./imgs/relign.png
+    custom_dir: overrides
+    navigation_depth: 3
+
+extra:
+    version:
+        default: latest
+        provider: mike
+
+plugins:
+    - mkdocstrings:
+        handlers:
+            python:
+                options:
+                    docstring_style: google
+                    show_submodules: true
+    - mike:
+        canonical_version: latest
+    - mkdocs-jupyter:
+        execute: false
+        allow_errors: false
+
+nav:
+    - Home: index.md
+    - Getting started: getting_started.ipynb
+    - Authors: authors.md
+    - API: api.md

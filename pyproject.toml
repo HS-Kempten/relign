@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relign"
+authors = [
+    {name = "Matthias Burkhardt (HS Kempten)", email="matthias.burkhardt@hs-kempten.de"},
+    {name = "Tobias Windisch (HS Kempten)", email="tobias.windisch@hs-kempten.de"},
+    {name = "Tobias Schmähling (HS Kempten)", email="tobias.schmaehling@hs-kempten.de"},
+]
+maintainers = [
+    {name = "Matthias Burkhardt (HS Kempten)", email="matthias.burkhardt@hs-kempten.de"},
+    {name = "Tobias Windisch (HS Kempten)", email="tobias.windisch@hs-kempten.de"},
+    {name = "Tobias Schmähling (HS Kempten)", email="tobias.schmaehling@hs-kempten.de"},
+]
+
+description = "A framework for active alignment using reinforcement learning."
+dynamic = ["version"]
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+    "torch",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "wandb",
+    "mitsuba>=3.6.0",
+    "gymnasium",
+    "scikit-optimize",
+    "stable_baselines3",
+    'sb3-contrib',
+    "typer",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mike",
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "mkdocs-jupyter",
+    "jupyter_contrib_nbextensions",
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "notebook<7.0.0",
+]
+
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "Q"]
+ignore = ["Q000", "E225", "E226"]
+
+[tool.black]
+line-length = 100
+skip-string-normalization = true
+
+[tool.setuptools.packages.find]
+include = ["relign*"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.pytest.ini_options]
+addopts="--cov relign --cov-report term --verbose"
+testpaths = [
+    "tests",
+]
+
+[tool.pyright]
+include = ["relign*"]
+pythonVersion = "3.11"
