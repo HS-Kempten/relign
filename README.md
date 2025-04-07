@@ -52,7 +52,8 @@ to build and serve the docs locally.
 
 ### Environment
 
-To familiarize yourself with using the environment for your own algorithms, see [docs/getting_started.ipynb](docs/getting_started.ipynb).
+To familiarize yourself with using the environment for your own algorithms, see [this 
+jupyter notebook](docs/getting_started.ipynb).
 
 ### Training a Model
 
@@ -79,3 +80,10 @@ python3 train.py --env="la" --curriculum --model=PPO \
       url={https://arxiv.org/abs/2503.02075}, 
 }
 ```
+
+## Funding
+
+![BMBF](./docs/imgs/acknowledgments/BMBF.jpg)
+
+This work was funded by the German Federal Ministry of Education and Research (BMBF) under 
+grant number 13FH605KX2.
