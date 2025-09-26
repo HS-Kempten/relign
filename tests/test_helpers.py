@@ -1,36 +1,33 @@
 import unittest
 import numpy as np
-from relign import helpers
+from relign.helpers import sensor_size_min, scene_objects
 
 
 class TestHelpers(unittest.TestCase):
-    def test_compute_z_positions_scene_objects(self):
-        n_lenses = np.arange(2, 5)
-        dist_lenses = 2
-        dist_sensor = 5
-        results_expected = {
-            2: {"sensor": 6, "lenses": [-1, 1]},
-            3: {"sensor": 7, "lenses": [-2, 0, 2]},
-            4: {"sensor": 8, "lenses": [-3, -1, 1, 3]},
-        }
-        for i in n_lenses:
-            z_positions = helpers.compute_z_positions_scene_objects(
-                dist_sensor=dist_sensor,
-                dist_lenses=dist_lenses,
-                n_lenses=i,
-            )
+    def test_sensor_size_min(self):
+        sensor_size = sensor_size_min(fov=90, focal_length=3, sensor_resolution=[200, 200])
+        np.testing.assert_array_almost_equal(sensor_size, np.array([6.0, 6.0]))
 
-            np.testing.assert_equal(
-                results_expected[i], z_positions, err_msg=f"computation fails for n_lenses=={i}"
-            )
+        sensor_size = sensor_size_min(fov=90, focal_length=3, sensor_resolution=[100, 200])
+        np.testing.assert_array_almost_equal(sensor_size, np.array([6.0, 12]))
 
-        # additional test for floats
-        np.testing.assert_equal(
-            helpers.compute_z_positions_scene_objects(
-                dist_sensor=0.5,
-                dist_lenses=0.4,
-                n_lenses=3,
-            ),
-            {"sensor": 0.9, "lenses": [-0.4, 0, 0.4]},
-            err_msg="computation fails for floats",
+        sensor_size = sensor_size_min(fov=90, focal_length=3, sensor_resolution=[200, 100])
+        np.testing.assert_array_almost_equal(sensor_size, np.array([12, 6.0]))
+
+    def test_scene_objects(self):
+        dct_a = scene_objects(
+            fov=84.1,
+            focal_length=2.895,
+            sensor_resolution=[865, 896],
+            exit_pupil_angle=13.45,
+            ref_pattern_res=[865, 896],
         )
+
+        dct_b = {
+            'sensor_scale': np.array([5.22249573, 5.40966031]),
+            'emitter_distance': np.float64(-2000.58559728545),
+            'emitter_scale': np.array([2506.63518571, 2596.46835421]),
+        }
+
+        for k, v in dct_a.items():
+            np.testing.assert_array_almost_equal(v, dct_b[k])

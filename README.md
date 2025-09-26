@@ -52,8 +52,7 @@ to build and serve the docs locally.
 
 ### Environment
 
-To familiarize yourself with using the environment for your own algorithms, see [this 
-jupyter notebook](docs/getting_started.ipynb).
+To familiarize yourself with using the environment for your own algorithms, see [docs/getting_started.ipynb](docs/getting_started.ipynb).
 
 ### Training a Model
 
@@ -62,9 +61,9 @@ To start training a model, use the `scripts/train.py` script. You can customize 
 #### Example Command
 
 ```bash
-python3 train.py --env="la" --curriculum --model=PPO \
-    --learning-rate=LEARNING_RATE --ent-coef=0.01 \
-    --benchmark="b_L2_N000"
+python3 scripts/train.py --env="la" --model=PPO \
+    --learning-rate=1e-3 --ent-coef=0.01 \
+    --benchmark="b_OD_N000_256"
 ```
 
 ## Citation
@@ -72,7 +71,7 @@ python3 train.py --env="la" --curriculum --model=PPO \
 ```
 @misc{burkhardt2025relign,
       title={Active Alignments of Lens Systems with Reinforcement Learning}, 
-      author={Matthias Burkhardt and Tobias Schmähling and Michael Layh and Tobias Windisch},
+      author={Matthias Burkhardt and Tobias Schmähling and Pascal Stegmann and Michael Layh and Tobias Windisch},
       year={2025},
       eprint={2503.02075},
       archivePrefix={arXiv},
@@ -82,8 +81,5 @@ python3 train.py --env="la" --curriculum --model=PPO \
 ```
 
 ## Funding
-
-![BMBF](./docs/imgs/acknowledgments/BMBF.jpg)
-
-This work was funded by the German Federal Ministry of Education and Research (BMBF) under 
-grant number 13FH605KX2.
+![BMFTR](./docs/imgs/bmftr.svg)  
+This work was funded by the German Federal Ministry of Research, Technology and Space (BMFTR) under grant number 13FH605KX2.

@@ -58,7 +58,7 @@ class TestGenerator(unittest.TestCase):
         env = GaussianIntensityEnv(n_actions=2)
         env.reset()
         img = env.step(np.array([0.1, 0.2]))["img"]
-        self.assertTupleEqual(img.shape, (env.WIDTH, env.HEIGHT, 1))
+        self.assertTupleEqual(img.shape, (env.width, env.height, 1))
 
     def test_compute_move_to_position(self):
         env = GaussianIntensityEnv(n_actions=2)
@@ -107,7 +107,6 @@ class TestGenerator(unittest.TestCase):
         self.assertTrue(np.any(env.r == 0))
 
     def test_correct_clipping(self):
-
         for clipping in ['soft', 'hard']:
             env = GaussianIntensityEnv(n_actions=5, clipping=clipping)
             env.reset()
@@ -122,26 +121,77 @@ class TestGenerator(unittest.TestCase):
             # Position should be exactly the corner
             np.testing.assert_array_almost_equal(env.r, np.ones(5), decimal=3)
 
+    def test_score_combined(self):
+        n_actions = 5
+        env = LensEnv(spec="od", width=200, height=200, n_actions=n_actions, score="combined")
+        env.reset()
+        r = np.ones(n_actions) * 0.3
+        env.r = np.array(r)
+        img = env.step(np.zeros(n_actions))["img"]
+
+        score = env._scores[-1]
+        score_expected = rmse(img, env._gt) + np.linalg.norm(r - env.R[:n_actions])
+
+        np.testing.assert_almost_equal(score, score_expected)
+
+        r = np.ones(n_actions) * 0.46
+        env.r = np.array(r)
+        img = env.step(np.zeros(n_actions))["img"]
+
+        score = env._scores[-1]
+        score_expected = rmse(img, env._gt)
+
+        np.testing.assert_almost_equal(score, score_expected)
+
+    def test_score_rmse(self):
+        n_actions = 5
+        env = LensEnv(spec="od", width=200, height=200, n_actions=n_actions, score="rmse")
+        env.reset()
+        r = np.ones(n_actions) * 0.3
+        env.r = np.array(r)
+        img = env.step(np.zeros(n_actions))["img"]
+        score = env._scores[-1]
+
+        score_expected = rmse(img, env._gt)
+
+        np.testing.assert_almost_equal(score, score_expected)
+
+    def test_score_distance(self):
+        n_actions = 2
+        env = LensEnv(
+            spec="od", width=50, height=50, n_actions=n_actions, score="distance", sample_count=64
+        )
+        env.reset()
+
+        r = np.ones(n_actions) * 0.48
+        env.r = np.array(r)
+        env.step(np.zeros(n_actions))
+        score = env._scores[-1]
+
+        score_expected = np.linalg.norm(r - env.R[:n_actions])
+
+        np.testing.assert_almost_equal(score, score_expected)
+
 
 class TestLensEnv(unittest.TestCase):
     def test_movement_all_possible_n_actions(self):
         env = LensEnv()
         for n_actions in range(env.N_ACTIONS_MAX):
-            env = LensEnv(n_actions=n_actions)
+            env = LensEnv(spec="l2", n_actions=n_actions)
             env.reset()
             img = env.step(get_random_action(42, n_actions))["img"]
-            self.assertTupleEqual(img.shape, (env.WIDTH, env.HEIGHT, 1))
-            self.assertFalse(np.array_equal(img, np.zeros((env.WIDTH, env.HEIGHT, 1))))
+            self.assertTupleEqual(img.shape, (env.width, env.height, 1))
+            self.assertFalse(np.array_equal(img, np.zeros((env.width, env.height, 1))))
 
-    def test_init_image_not_ground_gruth(self):
-        env = LensEnv(n_actions=4, seed=10)
+    def test_init_image_not_ground_truth(self):
+        env = LensEnv(spec="l2", n_actions=4, seed=10, width=50, height=50)
         img_init = env.reset()
         dist_to_gt = ((env._gt - img_init) ** 2).mean()
-        self.assertGreater(dist_to_gt, 0.03)
+        self.assertGreater(dist_to_gt, 1e-4)
 
     def test_vertex_positioning(self):
         n_actions = 5
-        env = LensEnv(n_actions=n_actions, seed=42, noise_angle=0, noise_translation=0)
+        env = LensEnv(spec="l2", n_actions=n_actions, seed=42, noise_objects=0)
         img_start = env.reset()
 
         start_vertices_start = env.lens_vertex_coords_start
@@ -158,7 +208,7 @@ class TestLensEnv(unittest.TestCase):
         self.assertFalse(np.array_equal(img_start, img_new))
 
     def test_reset_with_noise(self):
-        env = LensEnv(n_actions=5, seed=1337, noise_angle=0.25, noise_translation=0.25)
+        env = LensEnv(spec="l2", n_actions=5, seed=1337, noise_objects=0.25)
 
         img_start_0 = env.reset()
         start_vertices_0 = env.lens_vertex_coords_start
@@ -175,12 +225,12 @@ class TestLensEnv(unittest.TestCase):
         self.assertFalse(np.array_equal(w_0, w_1))
         self.assertFalse(np.array_equal(vp_0, vp_1))
 
-        env = LensEnv(n_actions=5, seed=42, noise_angle=0.25, noise_translation=0.25)
+        env = LensEnv(spec="l2", n_actions=5, seed=42, noise_objects=0.25)
         img_start_2 = env.reset()
         self.assertFalse(np.array_equal(img_start_0, img_start_2))
 
     def test_reset_without_noise(self):
-        env = LensEnv(n_actions=5, seed=10, noise_angle=0, noise_translation=0)
+        env = LensEnv(spec="l2", n_actions=5, seed=10, noise_objects=0.0)
 
         img_start_0 = env.reset()
         start_vertices_0 = env.lens_vertex_coords_start
@@ -197,7 +247,7 @@ class TestLensEnv(unittest.TestCase):
         self.assertFalse(np.array_equal(w_0, w_1))
         self.assertFalse(np.array_equal(vp_0, vp_1))
 
-        env = LensEnv(n_actions=5, seed=10, noise_angle=0, noise_translation=0)
+        env = LensEnv(spec="l2", n_actions=5, seed=10, noise_objects=0.0)
         img_start_2 = env.reset()
         np.testing.assert_array_equal(img_start_0, img_start_2)
 
@@ -257,7 +307,7 @@ class TestGymEnv(unittest.TestCase):
         self.assertTrue(terminated)
 
     def test_potential_reward(self):
-        env = GymnasiumEnv(score_goal_threshold=0.1, reward='potential')
+        env = GymnasiumEnv(score_goal_threshold=0.1, reward='potential', score='rmse')
         img_start, _ = env.reset()
         action = env.get_optimal_move()
         img_final, reward, _, _, _ = env.step(action)
@@ -274,7 +324,6 @@ class TestGymEnv(unittest.TestCase):
         self.assertLess(reward, 0)
 
     def test_stacking_and_vectorizing(self):
-
         n_envs = 10
         n_stack = 5
 
@@ -289,5 +338,21 @@ class TestGymEnv(unittest.TestCase):
         obs = env.reset()
 
         self.assertTupleEqual(
-            obs.shape, (n_envs, n_stack, env.envs[0].env.env.WIDTH, env.envs[0].env.env.WIDTH)
+            obs.shape, (n_envs, n_stack, env.envs[0].env.env.width, env.envs[0].env.env.width)
         )
+
+
+class TestOpticDesignSpec(unittest.TestCase):
+    def test_movement_all_possible_n_actions(self):
+        for n_actions in range(1, 6):
+            env = LensEnv(spec="od", n_actions=n_actions)
+            env.reset()
+            img = env.step(get_random_action(42, n_actions))["img"]
+            self.assertTupleEqual(img.shape, (env.width, env.height, 1))
+            self.assertFalse(np.array_equal(img, np.zeros((env.width, env.height, 1))))
+
+    def test_init_image_not_ground_truth(self):
+        env = LensEnv(spec="od", n_actions=4, seed=10)
+        img_init = env.reset()
+        dist_to_gt = ((env._gt - img_init) ** 2).mean()
+        self.assertGreater(dist_to_gt, 1e-4)
