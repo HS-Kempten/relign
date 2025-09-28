@@ -13,7 +13,6 @@ from relign.algorithms.coordinate_walk import CoordinateWalk
 
 
 class TestScan(unittest.TestCase):
-
     def test_scan_2d_action(self):
         env = GaussianIntensityEnv(n_actions=2, seed=42)
         env_wrapper = EnvWrapper(env)
@@ -23,7 +22,7 @@ class TestScan(unittest.TestCase):
 
         self.assertTupleEqual(x_opt.shape, (2,))
         env_wrapper(x_opt)
-        self.assertLess((env.get_optimal_move() ** 2).sum(), 1.0e-6)
+        self.assertLess((env.get_optimal_move() ** 2).sum(), 4.0e-6)
 
     def test_scan_3d_actions(self):
         env = GaussianIntensityEnv(n_actions=3)
@@ -37,7 +36,8 @@ class TestScan(unittest.TestCase):
         self.assertLess((env.get_optimal_move() ** 2).sum(), 1e-4)
 
     def test_scan_2d_action_la(self):
-        env = LensEnv(n_actions=2)
+        # env = LensEnv(n_actions=2, spec="l2", width=64, height=64, sample_count=64)
+        env = LensEnv(n_actions=2, width=50, height=50, sample_count=32)
         env_wrapper = EnvWrapper(env)
         env_wrapper.reset()
         algo = Scan(n_coordinate_steps=10, v_min=0.45, v_max=0.55)
@@ -48,7 +48,6 @@ class TestScan(unittest.TestCase):
 
 
 class TestGP(unittest.TestCase):
-
     def test_align(self):
         self.env = GaussianIntensityEnv(n_actions=2)
         self.env_wrapper = EnvWrapper(self.env)

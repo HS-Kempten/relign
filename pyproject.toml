@@ -25,29 +25,25 @@ dependencies = [
     "matplotlib",
     "scipy",
     "wandb",
-    "mitsuba>=3.6.0",
+    "mitsuba>=3.7.0",
     "gymnasium",
     "scikit-optimize",
     "stable_baselines3",
     'sb3-contrib',
     "typer",
     "tensorboard",
+    "scikit-image>=0.25.2",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "mike",
-    "mkdocs",
-    "mkdocs-material",
-    "mkdocstrings[python]",
-    "mkdocs-jupyter",
-    "jupyter_contrib_nbextensions",
-    "pre-commit",
-    "pytest",
-    "pytest-cov",
-    "notebook<7.0.0",
+    "ipykernel>=6.29.5",
+    "jupyter>=1.1.1",
+    "mkdocs>=1.6.1",
+    "pre-commit>=4.2.0",
+    "pytest-cov>=6.2.1",
+    "pytest>=8.3.5",
 ]
-
 
 [tool.ruff]
 line-length = 100
@@ -56,9 +52,11 @@ line-length = 100
 select = ["E", "F", "Q"]
 ignore = ["Q000", "E225", "E226"]
 
-[tool.black]
-line-length = 100
-skip-string-normalization = true
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "preserve"
 
 [tool.setuptools.packages.find]
 include = ["relign*"]
@@ -74,4 +72,4 @@ testpaths = [
 
 [tool.pyright]
 include = ["relign*"]
-pythonVersion = "3.11"
+pythonVersion = "3.13"

@@ -4,6 +4,7 @@ Core module holding the implementation of the Lens environment.
 
 import os
 import logging
+import warnings
 import numpy as np
 from scipy.stats import multivariate_normal
 import mitsuba as mi
@@ -14,11 +15,12 @@ from abc import (
 from importlib.resources import files
 from relign.helpers import (
     get_device,
-    compute_z_positions_scene_objects,
-    compute_focal_length,
     get_gt_filename_from_params,
     rmse,
+    construct_mitsuba_rotation_matrix,
+    clean_up_drjit,
 )
+from relign.config import Config
 import gymnasium as gym
 
 from stable_baselines3.common.vec_env import VecFrameStack
@@ -30,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 class BaseEnvironment(ABC):
     N_ACTIONS_MAX: int
-    WIDTH: int
-    HEIGHT: int
 
     def __init__(
         self,
@@ -40,8 +40,11 @@ class BaseEnvironment(ABC):
         reward="minus_one",
         max_episode_steps=200,
         score_goal_threshold=0.05,
-        noise_movement=0.02,
+        noise_movement=0.01,
         clipping="soft",
+        width=50,
+        height=50,
+        score="combined",
     ):
         if n_actions > self.N_ACTIONS_MAX:
             raise ValueError(f"n_actions must be <= {self.N_ACTIONS_MAX}")
@@ -49,6 +52,8 @@ class BaseEnvironment(ABC):
         if clipping not in ['soft', 'hard']:
             raise ValueError('Invalid clipping')
 
+        self.width = width
+        self.height = height
         self.max_episode_steps = max_episode_steps
         self.clipping = clipping
         self.score_goal_threshold = score_goal_threshold
@@ -62,6 +67,7 @@ class BaseEnvironment(ABC):
         # image
         self.r_optimal = self.R[0 : self.n_actions]
         self._setup_reward(reward)
+        self._setup_score(score)
 
     def reset(self):
         """
@@ -100,17 +106,33 @@ class BaseEnvironment(ABC):
         self._scores.append(self.compute_distance_to_gt(img))
         return img
 
+    def _distort_movement(self, r, a):
+        return self.W.dot(a) + r
+
     def _setup_reward(self, reward):
         self.reward_mappings = {
             "minus_one": self.compute_minus_one_reward,
             "potential": self.compute_potential_reward,
             "minus_one_edge": self.compute_minus_one_edge_reward,
             "minus_one_plus": self.compute_minus_one_plus,
+            "score": self.compute_score_reward,
         }
         if reward not in self.reward_mappings.keys():
             raise ValueError(f"given 'reward style' must be in {list(self.reward_mappings.keys())}")
         else:
-            self.comp_reward = self.reward_mappings[reward]
+            self.reward_func = self.reward_mappings[reward]
+
+    def _setup_score(self, score):
+        self.score_mappings = {
+            "rmse": self._score_rmse,
+            "rmse_binary": self._score_rmse_binary,
+            "combined": self._score_combined,
+            "distance": self._score_distance,
+        }
+        if score not in self.score_mappings.keys():
+            raise ValueError(f"given score must be in {list(self.score_mappings.keys())}")
+        else:
+            self.score_func = self.score_mappings[score]
 
     def _init_random_starting_position(self):
         return self.random.uniform(-0.5, 0.5, size=self.n_actions)
@@ -133,27 +155,53 @@ class BaseEnvironment(ABC):
         else:
             return -1
 
+    def compute_score_reward(self, *_):
+        return -self._scores[-1]
+
     def compute_distance_to_optimum(self):
         return rmse(self.r_optimal, self.r)
 
+    def _score_rmse(self, img):
+        return rmse(img, self._gt)
+
+    def _score_rmse_binary(self, img):
+        threshold = 0.02
+        bin_img0 = (img > threshold).astype(int)
+        bin_img1 = (self._gt > threshold).astype(int)
+        return rmse(bin_img0, bin_img1)
+
+    def _score_combined(self, img):
+        optimum_region_expected = 0.1
+        distance_to_center = np.linalg.norm(self.r - self.R[: self.n_actions])
+        if distance_to_center > optimum_region_expected:
+            score_r = distance_to_center
+        else:
+            score_r = 0
+
+        return rmse(img, self._gt) + score_r
+
+    def _score_distance(self, _):
+        return np.linalg.norm(self.r - self.R[: self.n_actions])
+
     def compute_distance_to_gt(self, img):
         if self._gt is None:
-            raise ValueError(
+            warnings.warn(
                 "No precomputed ground truth image was found for the current setup. Please run "
-                "`BaseEnv.create_gt()` to generate it. "
+                "`BaseEnv().create_gt()` to generate it. "
                 "Note that this process may take a few minutes."
             )
-        return rmse(img[:, :, 0], self._gt[:, :, 0])
+            return np.inf
+
+        return self.score_func(img)
 
     def _compute_move_to_position(self, r):
         return np.linalg.inv(self.W).dot((r - self.r).T)
 
     def _update(self, a):
-
         if not a.shape[0] == self.n_actions:
             raise ValueError("moving vector must have same dimension as `Environment.n_actions`")
 
-        r_proposed = self.W.dot(a) + self.r
+        r_proposed = self._distort_movement(r=self.r, a=a)
 
         if np.all((r_proposed >= 0) & (r_proposed <= 1)):
             self.r = r_proposed
@@ -229,7 +277,7 @@ class BaseEnvironment(ABC):
 
         return {
             "img": img,
-            "reward": self.comp_reward(truncated, terminated),
+            "reward": self.reward_func(truncated, terminated),
             "truncated": truncated,
             "terminated": terminated,
         }
@@ -260,9 +308,8 @@ class BaseEnvironment(ABC):
         """takes clipped r and creates image."""
         raise NotImplementedError
 
-    @staticmethod
     @abstractmethod
-    def create_gt():
+    def create_gt(self):
         """computes ground truth image."""
         raise NotImplementedError
 
@@ -279,19 +326,19 @@ class GaussianIntensityEnv(BaseEnvironment):
         cov_y = r[3]
         angle = r[4]
 
-        img = np.zeros(shape=(self.WIDTH, self.HEIGHT, 1), dtype=np.float32)
+        img = np.zeros(shape=(self.width, self.height, 1), dtype=np.float32)
 
         cov_x = 0.05 + (cov_x) ** 2 / 5
         cov_y = 0.05 + (cov_y) ** 2 / 5
 
-        center_x = center_x * self.WIDTH
-        center_y = center_y * self.HEIGHT
+        center_x = center_x * self.width
+        center_y = center_y * self.height
 
         angle = np.pi * angle / 2
 
         X, Y = np.meshgrid(
-            np.linspace(-1, 1, self.WIDTH, dtype=np.float32),
-            np.linspace(-1, 1, self.HEIGHT, dtype=np.float32),
+            np.linspace(-1, 1, self.width, dtype=np.float32),
+            np.linspace(-1, 1, self.height, dtype=np.float32),
         )
         xx = np.dstack((X, Y))
 
@@ -309,36 +356,34 @@ class GaussianIntensityEnv(BaseEnvironment):
         cov_rotated = np.matmul(np.matmul(rotation, cov), rotation.T)
 
         rv = multivariate_normal(
-            mean=[-1 + 2 * center_x / self.WIDTH, -1 + 2 * center_y / self.HEIGHT],
+            mean=[-1 + 2 * center_x / self.width, -1 + 2 * center_y / self.height],
             cov=cov_rotated,
         )
         img[:, :, 0] = img[:, :, 0] + rv.pdf(xx)
         return img
 
     def _load_gt(self):
-        filename = f"gt__{self.WIDTH}x{self.HEIGHT}.npy"
+        filename = f"gt__{self.width}x{self.height}.npy"
         return super()._load_gt_from_filename(filename)
 
-    @staticmethod
-    def create_gt():
-        env = GaussianIntensityEnv(seed=0, n_actions=5)
-        env.reset()
+    def create_gt(self):
+        self.reset()
 
-        filename = f'gt__{env.WIDTH}x{env.HEIGHT}.npy'
+        filename = f'gt__{self.width}x{self.height}.npy'
         path = os.path.join(
             str(files("relign")),
             "data",
-            env.__class__.__name__,
+            self.__class__.__name__,
             filename,
         )
 
-        np.save(path, env._make_image(env.R))
+        np.save(path, self._make_image(self.R))
 
     @staticmethod
     def starting_goal_threshold():
         env = GaussianIntensityEnv()
         img_gt = env._load_gt()
-        return rmse(np.zeros((env.WIDTH, env.HEIGHT, 1)), img_gt)
+        return rmse(np.zeros((env.width, env.height, 1)), img_gt)
 
 
 class LensEnv(BaseEnvironment):
@@ -346,68 +391,91 @@ class LensEnv(BaseEnvironment):
     Environment for mitsuba3.
     """
 
-    N_LENSES_MAX = 3
     N_ACTIONS_MAX = 5
-    WIDTH = 50
-    HEIGHT = 50
 
     def __init__(
         self,
-        n_lenses=2,
+        spec="od",
         score_goal_threshold=None,
         n_actions=5,
-        noise_angle=0.0,
-        noise_translation=0.0,
+        noise_objects=0.0,
         sample_count=512,
+        ref_pattern="siemens",
+        hr=False,
+        config=None,
+        width=50,
+        height=50,
+        mitsuba_variant=None,
         *args,
         **kwargs,
     ):
-        from relign.config import Config  # to avoid circular imports
+        self._check_for_deprecated_arguments(kwargs)
+        self._setup_mitsuba(mitsuba_variant)
 
         if score_goal_threshold is None:
-            score_goal_threshold = Config.targets_optimum["la"]({"n_lenses": n_lenses})
+            score_goal_threshold = Config.targets_optimum["la"][spec].get(
+                (width, height, sample_count), 0.0
+            )
 
-        if get_device() == "cpu" or get_device() == "mps":
+        if not (0 <= noise_objects <= 1):
+            raise ValueError("`noise_objects` must be between 0 (no noise) and 1 (maximum noise).")
+        if config is None:
+            self.config = {
+                "lens_env_specs": Config.lens_env_specs[spec],
+                "lens_object_specs": Config.lens_object_specs[spec],
+                "lens_noise_funcs": Config.lens_noise_funcs[spec],
+                "lens_scene_specs": Config.lens_env_specs[spec]["func"](
+                    **Config.lens_env_specs[spec]["lens_specs"],
+                    ref_pattern_res=[300, 300],
+                    sensor_resolution=[
+                        kwargs.get("width", 50),
+                        kwargs.get("height", 50),
+                    ],  # TODO: this is bit hacky and will fail if default changes.
+                ),
+            }
+        else:
+            self.config = config
+
+        self.spec = spec
+        self.hr = hr
+        self.noise_objects = noise_objects
+        self.sample_count = sample_count
+        self.ref_pattern = ref_pattern
+        # loads ground truth image
+        super().__init__(
+            score_goal_threshold=score_goal_threshold,
+            n_actions=n_actions,
+            width=width,
+            height=height,
+            *args,
+            **kwargs,
+        )
+
+    def _check_for_deprecated_arguments(self, kwargs):
+        if "n_lenses" in kwargs.keys():
+            raise RuntimeError(
+                "`n_lenses` parameter is deprecated and was removed. "
+                "Use `spec` argument instead with one of the following options: "
+                f"{[s for s in Config.lens_setups]}"
+            )
+
+        if "noise_angle" in kwargs.keys() or "noise_translation" in kwargs.keys():
+            raise RuntimeError(
+                "`noise_angle` and `noise_translation` parameters are deprecated and were removed. "
+                "Use single argument `noise_objects` instead."
+            )
+
+    def _setup_mitsuba(self, variant):
+        if variant is not None:
+            mi.set_variant(variant)
+        elif get_device() == "cpu" or get_device() == "mps":
             mi.set_variant("scalar_rgb")
             # mi.set_variant('llvm_ad_rgb') is bugged (memory leak)
         else:
-            mi.set_variant("cuda_ad_rgb")
+            mi.set_variant("cuda_ad_mono")
 
-        if not ((0 <= noise_angle <= 1) and (0 <= noise_translation <= 1)):
-            raise ValueError(
-                "`noise_angle` and `noise_translation` must be between 0 (no noise at all)"
-                f" and 1 (maximum noise). ({noise_angle} and {noise_translation} given)"
-            )
-        if 0 < n_lenses <= self.N_LENSES_MAX:
-            self.n_lenses = n_lenses
-        else:
-            raise ValueError(
-                f"can only create between 0 and (including) {self.N_LENSES_MAX} lenses"
-            )
-
-        z_positions = compute_z_positions_scene_objects(
-            n_lenses=self.n_lenses,
-            dist_lenses=0.35,
-            dist_sensor=1 / self.n_lenses,
-        )
-
-        if n_lenses == 1:
-            self.z_sensor = compute_focal_length() - 0.27 / 2
-        elif n_lenses == 2:
-            self.z_sensor = 0.8
-        elif n_lenses == 3:
-            self.z_sensor = 0.7
-        else:
-            self.z_sensor = z_positions["sensor"]
-
-        self.noise_angle = noise_angle
-        self.noise_translation = noise_translation
-        self.z_lenses = z_positions["lenses"]
-        self.sample_count = sample_count
-        # loads ground truth image
-        super().__init__(
-            score_goal_threshold=score_goal_threshold, n_actions=n_actions, *args, **kwargs
-        )
+        # TODO: This is currently needed, as issues with vertices produce too many warnings.
+        mi.set_log_level(mi.LogLevel.Error)
 
     def reset(self):
         """
@@ -416,48 +484,46 @@ class LensEnv(BaseEnvironment):
         Returns:
             The result of the superclass's `reset` method.
         """
-
-        from relign.helpers import clean_up
-
-        logger.debug("resetting env and cleaning up dr.jit")
-        clean_up()
-
+        clean_up_drjit()
         self.scene = self._create_optimal_scene()
         self.params = mi.traverse(self.scene)
-
         self._set_starting_lens_vertices()
-        if self.noise_angle > 0 or self.noise_translation > 0:
+        if self.noise_objects > 0.0:
             self._add_noise_to_lens_positions()
         return super().reset()
 
     def _set_starting_lens_vertices(self):
-        self.lens_vertex_coords_start = np.array(
-            [
-                np.array([self.params[f"lens_{lens}.vertex_positions"]]).reshape(-1, 3)
-                for lens in range(self.n_lenses)
-            ]
-        )
+        self.lens_vertex_coords_start = [
+            np.array([self.params[f"{obj}.vertex_positions"]]).reshape(-1, 3)
+            for obj in self.config["lens_object_specs"].keys()
+        ]
 
     def _create_optimal_scene(self):
         scene_dict = self._create_base_scene_dict()
         self._add_lenses_to_scene_dict(scene_dict)
-        return mi.load_dict(scene_dict, parallel=False)
+        return mi.load_dict(scene_dict, parallel=False, optimize=False)
 
     def render_scene_overview(
-        self, sensor_distance=None, axis=[1, 0, 0], sample_count=512, r=np.array([])
+        self,
+        sensor_distance=None,
+        axis=[1, 0, 0],
+        sample_count=512,
+        r=np.array([]),
+        width=200,
+        height=200,
     ):
         if r.size == 0:
-            r = self.r
+            r = self.fill_action_with_optimal_values()
         if isinstance(axis, list):
             axis = np.array(axis)
         elif not isinstance(axis, np.ndarray):
             raise ValueError("axis must be list-like object. E. g. [1, 0, 0]")
 
         if sensor_distance is None:
-            sensor_distance = 4.0 * np.log(self.n_lenses)
+            sensor_distance = self.config["lens_env_specs"].get("sensor_dist_overview", 7)
 
         scene_dict = self._create_base_scene_dict()
-        self._add_lenses_to_scene_dict(scene_dict)
+        self._add_lenses_to_scene_dict(scene_dict, overview=True)
 
         scene_dict["Light"] = {
             'type': 'constant',
@@ -466,7 +532,11 @@ class LensEnv(BaseEnvironment):
                 'value': 0.1,
             },
         }
-        bitmap = mi.Bitmap(self._make_image(r))
+
+        img_sensor = self._make_image(r) * self.config["lens_env_specs"].get(
+            "bitmap_contrast_factor", 1
+        )
+        bitmap = mi.Bitmap(img_sensor)
         texture = {
             'type': 'bitmap',
             'bitmap': bitmap,
@@ -476,24 +546,13 @@ class LensEnv(BaseEnvironment):
             'type': 'diffuse',
             'reflectance': texture,
         }
-
         scene_dict["sensor"]["bsdf"] = material
 
-        if np.array_equal(axis, np.array([1, 0, 0])):
-            for n in range(self.n_lenses):
-                scene_dict[f"lens_{n}"]["bsdf"] = {
-                    'type': 'roughdielectric',
-                    'distribution': 'beckmann',
-                    'alpha': 0.15,
-                    'int_ior': 'bk7',
-                    'ext_ior': 'air',
-                }
-
-        scene = mi.load_dict(scene_dict, parallel=False)
+        scene = mi.load_dict(scene_dict, parallel=False, optimize=False)
         params = mi.traverse(scene)
 
-        for n in range(self.n_lenses):
-            params[f"lens_{n}.vertex_positions"] = self.params[f"lens_{n}.vertex_positions"]
+        for obj in self.config["lens_object_specs"].keys():
+            params[f"{obj}.vertex_positions"] = self.params[f"{obj}.vertex_positions"]
 
         new_sensor = mi.load_dict(
             {
@@ -505,8 +564,8 @@ class LensEnv(BaseEnvironment):
                 ),
                 "film": {
                     "type": "hdrfilm",
-                    "width": 200,
-                    "height": 200,
+                    "width": width,
+                    "height": height,
                     "rfilter": {"type": "gaussian"},
                 },
                 "sampler": {
@@ -518,64 +577,47 @@ class LensEnv(BaseEnvironment):
 
         params.update()
         image = mi.render(scene, sensor=new_sensor)
-        img = image.numpy()[..., 0].reshape(200, 200, 1)
+        img = image.numpy()[..., 0].reshape(width, height, 1)
         return img
 
-    def _add_lenses_to_scene_dict(self, scene_dict):
-        for i, z in zip(range(self.n_lenses), self.z_lenses):
-            scene_dict[f"lens_{i}"] = {
+    def _add_lenses_to_scene_dict(self, scene_dict, overview=False):
+        specs = self.config["lens_object_specs"]
+
+        for obj_name, obj_specs in specs.items():
+            scene_dict[obj_name] = {
                 "type": "ply",
-                "face_normals": True,
+                "face_normals": False,
                 "filename": os.path.join(
                     str(files("relign")),
                     "data",
                     f"{self.__class__.__name__}",
-                    "lens.PLY",
+                    "high_res" if self.hr else "",
+                    obj_specs["filename"],
                 ),
-                "to_world": mi.ScalarTransform4f().translate([0.0, 0.0, z]),
-                "bsdf": {
-                    "type": "dielectric",
-                    "int_ior": 1.5168,  # Interior refractive index nbk 7
-                    "ext_ior": 1.0,  # Exterior refractive index (air)
-                },
+                "to_world": mi.ScalarTransform4f()
+                .translate(obj_specs["translate"])
+                .scale(obj_specs.get("scale", np.ones(3))),
+                "bsdf": (
+                    obj_specs.get("bsdf_overview", obj_specs["bsdf"])
+                    if overview
+                    else obj_specs["bsdf"]
+                ),
             }
 
     def _add_noise_to_lens_positions(self):
-        noise_angles_xy = self.random.normal(
-            loc=0, scale=self.noise_angle * 25, size=(self.n_lenses, 2)
-        )
-        noise_translation_xyz = np.hstack(
-            [
-                self.random.normal(
-                    loc=0, scale=self.noise_translation * 0.025, size=(self.n_lenses, 2)
-                ),
-                np.zeros((self.n_lenses, 1)),
-            ]
-        )
-
-        for lens, angles, translation, z_position in zip(
-            range(self.n_lenses), noise_angles_xy, noise_translation_xyz, self.z_lenses
-        ):
-            lens_vertices = np.array(self.params[f"lens_{lens}.vertex_positions"]).reshape(-1, 3)
-
-            # this could be done in one matrix
-
-            # translation in origin.
-            lens_vertices -= [0, 0, z_position]
-
-            # rotation
-            rotation_matrix = self._construct_rotation_matrix(angles)
-            lens_vertices = lens_vertices @ rotation_matrix.T
-
-            # apply translation noise
-            lens_vertices += translation
-
-            # translate back to starting position
-            lens_vertices += [0, 0, z_position]
-
-            self.params[f"lens_{lens}.vertex_positions"] = lens_vertices.flatten()
+        for obj, noise_func in self.config["lens_noise_funcs"].items():
+            vertices = np.array(self.params[f"{obj}.vertex_positions"]).reshape(-1, 3)
+            vertices_after_noise = noise_func(
+                vertices=vertices,
+                rng=self.random,
+                scale_factor=self.noise_objects,
+                pos_z=self.config["lens_object_specs"][obj]["translate"][-1],
+            )
+            self.params[f"{obj}.vertex_positions"] = vertices_after_noise.flatten()
 
         self._set_starting_lens_vertices()
+
+        return None
 
     def _create_base_scene_dict(self):
         return {
@@ -586,9 +628,9 @@ class LensEnv(BaseEnvironment):
             "sensor": {
                 'type': 'rectangle',
                 'to_world': mi.ScalarTransform4f()
-                .translate([0.0, 0.0, self.z_sensor])
+                .translate([0.0, 0.0, self.config["lens_env_specs"]["sensor_z"]])
                 .rotate(axis=[1, 0, 0], angle=180)
-                .scale([0.5, 0.5, 0.5]),
+                .scale(np.append(self.config["lens_scene_specs"]["sensor_scale"] / 2.0, 1)),
                 'sensor': {
                     'type': 'irradiancemeter',
                     'sampler': {
@@ -598,8 +640,8 @@ class LensEnv(BaseEnvironment):
                     },
                     "film": {
                         "type": "hdrfilm",
-                        "width": self.WIDTH,
-                        "height": self.HEIGHT,
+                        "width": self.width,
+                        "height": self.height,
                         "rfilter": {
                             "type": "box",
                         },
@@ -607,14 +649,27 @@ class LensEnv(BaseEnvironment):
                 },
             },
             "Light": {
-                "type": "envmap",
-                "filename": os.path.join(
-                    str(files("relign")),
-                    "data",
-                    f"{self.__class__.__name__}",
-                    "env_map_200.png",
+                "type": "rectangle",
+                "to_world": mi.ScalarTransform4f().look_at(
+                    origin=[0, 0, self.config["lens_scene_specs"]["emitter_distance"]],
+                    target=[0, 0, 0],
+                    up=[0, 1, 0],
+                )
+                @ mi.ScalarTransform4f().scale(
+                    np.append(self.config["lens_scene_specs"]["emitter_scale"] / 2, 1)
                 ),
-                "to_world": mi.ScalarTransform4f().rotate(axis=np.array([0, 1, 0]), angle=180),
+                "emitter": {
+                    "type": "area",
+                    "radiance": {
+                        "type": "bitmap",
+                        "filename": os.path.join(
+                            str(files("relign")),
+                            "data",
+                            "ref_patterns",
+                            self.ref_pattern + ".png",
+                        ),
+                    },
+                },
             },
         }
 
@@ -630,41 +685,29 @@ class LensEnv(BaseEnvironment):
         """
         # scale into [-1, 1]
         r = 2 * r - 1
-        # Scale angles
-        angles = 30 * r[3:]
-        z = 1.0 / (self.n_lenses * self.n_lenses) * r[2]
-        xy = 0.4 * r[:2]
+
+        angles = self.config["lens_env_specs"]["rotation_scaling"] * r[3:]
+        translation_vector = self.config["lens_env_specs"]["translation_scaling"] * r[:3]
 
         # First, we have to rotate
         rotated_vertices = self.rotate(angles)
         # After rotation, position needs to be translated
         self.translate(
             rotated_vertices=rotated_vertices,
-            translation_vector=np.array([xy[0], -xy[1], z]),
+            translation_vector=np.array(translation_vector),
         )
 
         self.params.update()
         image = mi.render(self.scene, seed=int(self.random.integers(2**32 - 1)))
 
-        return image.numpy()[..., 0].reshape(self.WIDTH, self.HEIGHT, 1)
-
-    def _construct_rotation_matrix(self, angles):
-        # Construct rotation matrix by multiplying the rotation matrices of all axes
-        rotation_matrix = np.identity(3)
-        for i, angle in enumerate(angles):
-            axis = np.eye(3)[i]
-            R = np.array(mi.scalar_rgb.Transform4f().rotate(axis=axis, angle=angle).matrix)[
-                :3, :3
-            ].T
-            rotation_matrix = rotation_matrix @ R
-        return rotation_matrix
+        return image.numpy()[..., 0].reshape(self.height, self.width, 1)
 
     def rotate(self, angles):
         rotated_vertices = self.lens_vertex_coords_start
 
         if angles is not None:
-            rotation_matrix = self._construct_rotation_matrix(angles)
-            rotated_vertices = rotated_vertices @ rotation_matrix.T
+            rotation_matrix = construct_mitsuba_rotation_matrix(angles)
+            rotated_vertices = [r @ rotation_matrix.T for r in rotated_vertices]
 
         return rotated_vertices
 
@@ -672,68 +715,66 @@ class LensEnv(BaseEnvironment):
         if translation_vector is None:
             translation_vector = np.array([0, 0, 0])
 
-        # applies general translation of objective (to all lenses)
-        translated_vertices = rotated_vertices + translation_vector
+        translated_vertices = [t + translation_vector for t in rotated_vertices]
 
-        # apply transformation to lenses
-        for i in range(self.n_lenses):
-            self.params[f"lens_{i}.vertex_positions"] = translated_vertices[i].flatten()
+        for i, obj in enumerate(self.config["lens_object_specs"].keys()):
+            self.params[f"{obj}.vertex_positions"] = translated_vertices[i].flatten()
 
     def _make_image(self, r):
         """r is always between [0, 1] here."""
         return self._render_scene(r)
 
     def get_optimal_move(self):
-        raise ValueError("optimal move is not available for `LensEnv`!")
+        raise ValueError("optimal move is not available!")
 
-    def _load_gt(self, n_samples=1000):
+    def _load_gt(self, sample_count=2**16):
         filename = get_gt_filename_from_params(
-            n_lenses=self.n_lenses,
-            n_samples=n_samples,
-            width=self.WIDTH,
-            height=self.HEIGHT,
+            width=self.width,
+            height=self.height,
+            ref_pattern=self.ref_pattern,
+            sample_count=sample_count,
+            spec=self.spec,
         )
         return super()._load_gt_from_filename(filename)
 
-    @staticmethod
-    def create_gt(n_samples=1000, n_lenses=2, sample_count=512):
-        env = LensEnv(
-            n_actions=5,
-            n_lenses=n_lenses,
-            noise_angle=0.0,
-            noise_translation=0.0,
-            sample_count=sample_count,
+    def create_gt(self, sample_count=2**16):
+        self.sample_count = sample_count
+        self.reset()
+
+        img = self._make_image(self.R)
+
+        filename = (
+            "gt"
+            + f"__spec_{self.spec}"
+            + f"__ref_pattern_{self.ref_pattern}"
+            + f"__sample_count_{sample_count}"
+            + f"__{self.width}x{self.height}.npy"
         )
-        optimal_r = env.R
-        imgs = []
 
-        for _ in np.arange(n_samples):
-            env.reset()
-            imgs.append(env._make_image(optimal_r))
-
-        mean_image = np.mean(imgs, axis=0)
-
-        filename = f'gt__n_lenses_{n_lenses}__n_samples_{n_samples}__{env.WIDTH}x{env.HEIGHT}.npy'
         path = os.path.join(
             str(files("relign")),
             "data",
-            env.__class__.__name__,
+            self.__class__.__name__,
             filename,
         )
 
-        np.save(path, mean_image)
-        return mean_image, imgs
+        np.save(path, img)
+        return img
 
-    @staticmethod
-    def compute_mean_env_variation(n_samples=1000, n_lenses=2):
-        gt, imgs = LensEnv.create_gt(n_samples, n_lenses)
-        return np.mean([rmse(img[:, :, 0], gt[:, :, 0]) for img in imgs])
+    def compute_mean_env_variation(self, n_samples=1000):
+        if self._gt is None:
+            self._gt = self.create_gt()
+            warnings.warn("Creating ground truth for current setup. This may take some time.")
 
-    @staticmethod
-    def starting_goal_threshold(n_samples=1000):
-        env = LensEnv()
-        img_gt = env._load_gt(n_samples=n_samples)
-        return rmse(np.zeros((env.WIDTH, env.HEIGHT, 1)), img_gt)
+        imgs = []
+        for _ in range(n_samples):
+            self.reset()
+            img = self._make_image(self.R)
+            imgs.append(img)
+        return np.mean([self.compute_distance_to_gt(img) for img in imgs])
+
+    def starting_goal_threshold(self):
+        return rmse(np.zeros((self.width, self.height, 1)), self._gt)
 
 
 class EnvWrapper:
@@ -770,7 +811,6 @@ class EnvWrapper:
 
 
 class GymnasiumEnv(gym.Env):
-
     def __init__(
         self,
         env_cls=GaussianIntensityEnv,
@@ -779,23 +819,21 @@ class GymnasiumEnv(gym.Env):
     ):
         self.env = env_cls(*args, **kwargs)
         self.observation_space = gym.spaces.Box(
-            low=0, high=3, shape=(1, self.env.WIDTH, self.env.HEIGHT), dtype=np.float32
+            low=0, high=3.5, shape=(1, self.env.width, self.env.height), dtype=np.float32
         )
         self.action_space = gym.spaces.Box(
             low=-0.2, high=0.2, shape=(self.env.n_actions,), dtype=np.float32
         )
 
     def _preprocess_obs(self, img):
-        # TODO: in future, this should be: img.reshape(1, 50, 50)
-        return np.swapaxes(img, 0, 2)
+        return img.reshape(-1, self.env.width, self.env.height)
 
     def get_optimal_move(self):
         return self.env.get_optimal_move()
 
     @property
     def obs_shape(self):
-        # TODO: in future, this should be: (width, height, 1)
-        return (1, self.env.WIDTH, self.env.HEIGHT)
+        return (1, self.env.width, self.env.height)
 
     @property
     def gt(self):
@@ -807,7 +845,6 @@ class GymnasiumEnv(gym.Env):
         return self._preprocess_obs(img), {}
 
     def step(self, action):
-
         dct = self.env.step(action)
         return (
             self._preprocess_obs(dct["img"]),
@@ -828,15 +865,13 @@ def make_stacked_vec_env(
     reward="minus_one",
     env_args={},
 ):
-    from relign.config import Config  # to avoid circular imports
-
     env_kwargs = {
         'score_goal_threshold': score_threshold,
         'max_episode_steps': max_episode_steps,
     }
 
-    env_kwargs["env_cls"] = Config.envs[env_name]["cls"]
-    env_kwargs["n_actions"] = Config.envs[env_name]["cls"].N_ACTIONS_MAX
+    env_kwargs["env_cls"] = Config.get_envs()[env_name]["cls"]
+    env_kwargs["n_actions"] = Config.get_envs()[env_name]["cls"].N_ACTIONS_MAX
     env_kwargs["seed"] = seed
     env_kwargs["reward"] = reward
     env_kwargs.update(env_args)

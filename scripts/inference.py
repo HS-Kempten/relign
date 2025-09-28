@@ -3,7 +3,7 @@ import os
 import glob
 import argparse
 import pickle
-from stable_baselines3 import PPO  
+from stable_baselines3 import PPO
 import wandb
 from relign.generator import make_stacked_vec_env
 import json
@@ -72,7 +72,8 @@ def main(
                 actions.append([])
                 obs_list.append([])
                 r.append([])
-                score.append(env._scores[1:])
+                # score.append(env._scores[1:])
+                score.append(env._rmse[1:])
         else:
             print(f"Processing model: {model_id}")
             model_path = np.sort(
@@ -182,18 +183,20 @@ if __name__ == "__main__":
     if args.tags == "baseline":
         ids = ids + ['gp', 'forest', 'random_search']
 
-        for n_lenses in [2, 3]:
+        for noise in [0, 0.25, 0.5]:
             env_args = {
-                'n_lenses': n_lenses,
-                'noise_angle': args.noise,
-                'noise_translation': args.noise,
+                'spec': "od",
+                'noise_objects': noise,
+                'width': 200,
+                'height': 200,
+                'sample_count': 64,
             }
 
             main(
                 args.tags,
                 args.steps,
                 args.num_runs,
-                f'l_{n_lenses}_n_{args.noise}_{args.save_name}',
+                f'od_{noise}',
                 ids,
                 args.render_overview,
                 args.seed,

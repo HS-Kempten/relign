@@ -16,9 +16,7 @@ from relign.curriculum import (
 
 
 class TestThreshold(unittest.TestCase):
-
     def test_comparisons(self):
-
         threshold = Threshold(1)
 
         self.assertLess(threshold, 2)
@@ -28,28 +26,28 @@ class TestThreshold(unittest.TestCase):
 
 
 class TestCL(unittest.TestCase):
-
     def test_curriculum_learning_with_gaussian_intensity(self):
-
         threshold = Threshold(2)
 
         env_train = make_vec_env(
             env_id=GymnasiumEnv,
-            n_envs=5,
+            n_envs=1,
             env_kwargs={
                 'env_cls': GaussianIntensityEnv,
                 'score_goal_threshold': threshold,
                 'max_episode_steps': 10,
+                'score': 'rmse',
             },
         )
 
         env_eval = make_vec_env(
             env_id=GymnasiumEnv,
-            n_envs=5,
+            n_envs=1,
             env_kwargs={
                 'env_cls': GaussianIntensityEnv,
                 'score_goal_threshold': threshold,
                 'max_episode_steps': 50,
+                'score': 'rmse',
             },
         )
 

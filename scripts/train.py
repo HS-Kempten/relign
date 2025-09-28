@@ -55,7 +55,21 @@ def _get_slurm_id():
 
 def train(params):
     env_args, model_args, training_args = Config.setup_params(params)
-    target_optimum = Config.targets_optimum[training_args["env"]](env_args)
+
+    # TODO: hacky
+    target_optimum = params.get("sgt", None)
+
+    if target_optimum is None:
+        try:
+            target_optimum = Config.targets_optimum[training_args["env"]][env_args["spec"]][
+                env_args["width"], env_args["height"], env_args["sample_count"]
+            ]
+        except KeyError:
+            raise ValueError(
+                "no `score_goal_threshold` can be found for given setup of "
+                f"lens spec {env_args["spec"]} and resolution "
+                f"{env_args["width"]}x{env_args["height"]}."
+            )
 
     if training_args['curriculum']:
         # Start with a larger threshold
@@ -66,9 +80,12 @@ def train(params):
             )
 
         else:
+            score_goal_threshold = Threshold(0.1)
+            """
             score_goal_threshold = Threshold(
                 Config.envs[training_args["env"]]["cls"].starting_goal_threshold() * 0.9 * 0.5
             )
+            """
 
         curriculum_callback = CLCallbackSteps(
             threshold=score_goal_threshold,
@@ -79,7 +96,10 @@ def train(params):
 
     else:
         curriculum_callback = None
-        score_goal_threshold = 5 * target_optimum
+        if env_args["spec"] == "od":  # TODO: this must be changed
+            score_goal_threshold = target_optimum
+        else:
+            score_goal_threshold = 5 * target_optimum
 
     env_eval, env_train = (
         _make_env(
@@ -97,7 +117,13 @@ def train(params):
     run = wandb.init(
         project='relign',
         sync_tensorboard=True,
-        config={**env_args, **model_args, **training_args, **_get_slurm_id()},
+        config={
+            **env_args,
+            **model_args,
+            **training_args,
+            **_get_slurm_id(),
+            **{"score_goal_threshold": score_goal_threshold},
+        },
     )
     save_model_callback = SaveCallback(
         model_save_path=f"{working_dir}/relign/models/{run.id}", threshold=score_goal_threshold
@@ -128,14 +154,13 @@ def train(params):
 def main(
     env: Annotated[str, Option(help="Environment used")],
     model: Annotated[str, Option(help="Reinforcement Learning Model")],
-    n_lenses: Annotated[
-        Optional[int], Option(help="Number of lenses in optical lens setup")
-    ] = None,
+    spec: Annotated[Optional[str], Option(help="Lens Specification")] = None,
     noise_movement: Annotated[Optional[float], Option(help="Noise for every movement")] = None,
-    noise_translation: Annotated[
-        Optional[float], Option(help="Translated single lens noise")
+    noise_objects: Annotated[
+        Optional[float], Option(help="Noise within object orientation")
     ] = None,
-    noise_angle: Annotated[Optional[float], Option(help="Rotated single lens noise")] = None,
+    width: Annotated[Optional[int], Option(help="Desired pixel width of output image")] = None,
+    height: Annotated[Optional[int], Option(help="Desired pixel height of output image")] = None,
     learning_rate: Annotated[Optional[float], Option(help="Learning rate for the model")] = None,
     ent_coef: Annotated[Optional[float], Option(help="Entropy coefficient for the model")] = None,
     vf_coef: Annotated[
@@ -171,6 +196,9 @@ def main(
     reward: Annotated[Optional[str], Option(help="The reward to use")] = None,
     benchmark: Annotated[
         Optional[str], Option(help="Benchmark string. Warning: Overrides parameters!")
+    ] = None,
+    sgt: Annotated[
+        Optional[float], Option(help="Score goal threshold. When is goal reached?")
     ] = None,
     ctx: Context = Option(None, hidden=True),
 ):
